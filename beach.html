@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>FishCast · Field</title>
+<style>
+  :root{
+    --bg:#0a1721; --panel:#0f2230; --panel2:#13293a; --line:#1f3d52;
+    --txt:#e7f1f7; --dim:#8fb0c4; --accent:#37c8e6; --good:#3ddc84; --mid:#f0b429; --rough:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--txt);
+    background:linear-gradient(180deg,#0a1721,#071019);min-height:100vh;padding:14px;-webkit-tap-highlight-color:transparent}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  h1{font-size:1.3rem;margin:0}
+  h1 .w{color:var(--accent)}
+  a.back{margin-left:auto;color:var(--dim);text-decoration:none;font-size:.85rem;border:1px solid var(--line);padding:6px 10px;border-radius:8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+  .card h2{font-size:.72rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);margin:0 0 12px}
+  button{font-size:1rem;border:none;border-radius:10px;padding:14px 16px;cursor:pointer;font-weight:600;width:100%}
+  .btn-primary{background:var(--accent);color:#04222b}
+  .btn-tag{background:var(--good);color:#06301f}
+  .btn-tag:disabled{background:#274a3a;color:#6f9a85}
+  .btn-ghost{background:var(--panel2);color:var(--txt);border:1px solid var(--line)}
+  .fix{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end}
+  .fix .big{font-size:2.3rem;font-weight:800;line-height:1}
+  .fix .lab{font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
+  .coords{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.9rem;color:var(--dim);margin-top:8px}
+  .acc-good{color:var(--good)} .acc-mid{color:var(--mid)} .acc-rough{color:var(--rough)}
+  .status{font-size:.85rem;color:var(--dim);margin-top:8px}
+  label.field{display:block;font-size:.75rem;color:var(--dim);margin:10px 0 4px;text-transform:uppercase;letter-spacing:1px}
+  input,select{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0c1e2b;color:var(--txt);font-size:1rem}
+  .row{display:flex;gap:10px}
+  .row>*{flex:1}
+  .spot{background:#0c1e2b;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:8px}
+  .spot .top{display:flex;align-items:baseline;gap:8px}
+  .spot .name{font-weight:700}
+  .spot .type{font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+  .spot .dist{font-size:1.5rem;font-weight:800;margin-top:6px}
+  .spot .meta{font-size:.75rem;color:var(--dim);margin-top:2px}
+  .spot .del{width:auto;padding:6px 10px;font-size:.75rem;margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--dim)}
+  .empty{color:var(--dim);font-size:.9rem}
+  .tip{font-size:.78rem;color:var(--dim);margin-top:10px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fish<span class="w">Cast</span> · Field</h1>
+  <a class="back" href="index.html">← board</a>
+</header>
+
+<!-- LIVE GPS -->
+<div class="card">
+  <h2>Your position</h2>
+  <div id="gpsOff">
+    <button class="btn-primary" onclick="startGPS()">📍 Enable GPS</button>
+    <div class="tip">Asks for location permission once. Works best outdoors with open sky. Nothing leaves your phone.</div>
+  </div>
+  <div id="gpsOn" style="display:none">
+    <div class="fix">
+      <div><div class="lab">Accuracy</div><div class="big"><span id="accVal">–</span><span style="font-size:1rem"> m</span></div></div>
+      <div><div class="lab">Altitude</div><div style="font-size:1.3rem;font-weight:700"><span id="altVal">–</span> m</div></div>
+    </div>
+    <div class="coords" id="coords">–</div>
+    <div class="status" id="status">acquiring…</div>
+  </div>
+</div>
+
+<!-- TAG A SPOT -->
+<div class="card">
+  <h2>Tag a spot</h2>
+  <div class="row">
+    <div style="flex:2">
+      <label class="field">Label</label>
+      <input id="label" placeholder="e.g. north trough" />
+    </div>
+    <div>
+      <label class="field">Type</label>
+      <select id="type">
+        <option value="trough">Trough</option>
+        <option value="bar">Sandbar</option>
+        <option value="rip">Rip / channel</option>
+        <option value="cut">Cut / hole</option>
+        <option value="peak">Peak</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+  </div>
+  <label class="field">Note (optional)</label>
+  <input id="note" placeholder="depth, foam line, structure…" />
+  <div style="margin-top:12px"><button class="btn-tag" id="tagBtn" onclick="tagHere()" disabled>⛳ Tag here</button></div>
+  <div class="tip" id="tagTip">Enable GPS first. Tip: wait for accuracy to settle (green) before tagging — and it stores the accuracy with each spot.</div>
+</div>
+
+<!-- SAVED SPOTS -->
+<div class="card">
+  <h2>Saved spots <span id="count" style="color:var(--dim)"></span></h2>
+  <div id="spots"><div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it.</div></div>
+  <div style="margin-top:10px" id="exportRow"></div>
+</div>
+
+<script>
+const KEY="fishcast_spots";
+let watchId=null, last=null;
+let spots = load();
+
+function load(){ try{ return JSON.parse(localStorage.getItem(KEY)||"[]"); }catch(e){ return []; } }
+function persist(){ localStorage.setItem(KEY, JSON.stringify(spots)); }
+
+/* ---- geolocation ---- */
+function startGPS(){
+  if(!navigator.geolocation){ document.getElementById("status").textContent="This browser has no geolocation."; return; }
+  document.getElementById("gpsOff").style.display="none";
+  document.getElementById("gpsOn").style.display="block";
+  setStatus("requesting permission…");
+  watchId = navigator.geolocation.watchPosition(onPos, onErr,
+    { enableHighAccuracy:true, maximumAge:1000, timeout:25000 });
+}
+function setStatus(s){ document.getElementById("status").textContent=s; }
+function accClass(a){ return a<=5?"acc-good":a<=10?"acc-mid":"acc-rough"; }
+
+function onPos(p){
+  last=p.coords;
+  const a=last.accuracy;
+  const el=document.getElementById("accVal");
+  el.textContent=a.toFixed(0); el.className="";
+  el.parentElement.className="big "+accClass(a);
+  document.getElementById("altVal").textContent = last.altitude!=null ? last.altitude.toFixed(0) : "—";
+  document.getElementById("coords").textContent =
+    `${last.latitude.toFixed(6)}, ${last.longitude.toFixed(6)}`;
+  setStatus(a<=8 ? "good fix — ready to tag" : "fix is loose — move to open sky / wait a moment");
+  const btn=document.getElementById("tagBtn"); btn.disabled=false;
+  btn.textContent = a<=8 ? "⛳ Tag here" : "⛳ Tag here (loose fix)";
+  renderSpots();
+}
+function onErr(e){
+  const msg={1:"Permission denied — enable location for this site in your browser settings.",
+             2:"Position unavailable — no signal yet.",3:"Timed out — trying again…"}[e.code]||e.message;
+  setStatus(msg);
+}
+
+/* ---- tagging ---- */
+function tagHere(){
+  if(!last){ setStatus("no fix yet"); return; }
+  const type=document.getElementById("type").value;
+  const label=document.getElementById("label").value.trim() || (type+" "+(spots.length+1));
+  spots.push({
+    id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    label, type,
+    note: document.getElementById("note").value.trim(),
+    lat:last.latitude, lon:last.longitude, acc:Math.round(last.accuracy),
+    alt: last.altitude!=null ? Math.round(last.altitude) : null,
+    ts: Date.now()
+  });
+  persist();
+  document.getElementById("label").value=""; document.getElementById("note").value="";
+  renderSpots();
+}
+function del(id){ spots=spots.filter(s=>s.id!==id); persist(); renderSpots(); }
+
+/* ---- distance + bearing ---- */
+const toR=Math.PI/180, toD=180/Math.PI;
+function haversine(la1,lo1,la2,lo2){
+  const R=6371000, dLa=(la2-la1)*toR, dLo=(lo2-lo1)*toR;
+  const a=Math.sin(dLa/2)**2+Math.cos(la1*toR)*Math.cos(la2*toR)*Math.sin(dLo/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+function bearing(la1,lo1,la2,lo2){
+  const y=Math.sin((lo2-lo1)*toR)*Math.cos(la2*toR);
+  const x=Math.cos(la1*toR)*Math.sin(la2*toR)-Math.sin(la1*toR)*Math.cos(la2*toR)*Math.cos((lo2-lo1)*toR);
+  return (Math.atan2(y,x)*toD+360)%360;
+}
+const compass=deg=>["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"][Math.round(deg/22.5)%16];
+
+/* ---- render ---- */
+function renderSpots(){
+  document.getElementById("count").textContent = spots.length ? `(${spots.length})` : "";
+  const wrap=document.getElementById("spots");
+  if(!spots.length){ wrap.innerHTML='<div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it.</div>';
+    document.getElementById("exportRow").innerHTML=""; return; }
+
+  // compute live distance if we have a fix
+  const list = spots.map(s=>{
+    let dist=null, brng=null, err=null;
+    if(last){ dist=haversine(last.latitude,last.longitude,s.lat,s.lon);
+      brng=bearing(last.latitude,last.longitude,s.lat,s.lon);
+      err=Math.round(Math.sqrt(last.accuracy**2 + s.acc**2)); }
+    return {...s, dist, brng, err};
+  });
+  if(last) list.sort((a,b)=>a.dist-b.dist);
+
+  wrap.innerHTML = list.map(s=>{
+    const d = s.dist!=null
+      ? `<div class="dist">${s.dist.toFixed(0)} m · ${(s.dist*1.094).toFixed(0)} yd
+           <span style="font-size:.9rem;color:var(--dim)">${compass(s.brng)} · ±${s.err} m</span></div>`
+      : `<div class="meta">enable GPS to see distance</div>`;
+    return `<div class="spot">
+      <div class="top"><span class="name">${esc(s.label)}</span><span class="type">${s.type}</span>
+        <button class="del" onclick="del('${s.id}')">delete</button></div>
+      ${d}
+      <div class="meta">tagged ±${s.acc} m${s.note?" · "+esc(s.note):""}</div>
+    </div>`;
+  }).join("");
+
+  document.getElementById("exportRow").innerHTML='<button class="btn-ghost" onclick="exportJSON()">⬇ Export spots (JSON)</button>';
+}
+function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
+
+function exportJSON(){
+  const blob=new Blob([JSON.stringify(spots,null,2)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download="fishcast-spots.json"; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+renderSpots();
+</script>
+</body>
+</html>
