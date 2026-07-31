@@ -246,7 +246,8 @@ function renderSpots(){
       : `<div class="meta">enable GPS to see distance</div>`;
     return `<div class="spot">
       <div class="top"><span class="name">${esc(s.label)}</span><span class="type">${s.type}</span>
-        <button class="del" onclick="addPhoto('${s.id}')">📷</button>
+        <button class="del" onclick="addPhoto('${s.id}')" title="add photo">📷</button>
+        <button class="del" onclick="shareCard('${s.id}')" title="share as image card" style="margin-left:6px">🖼</button>
         <button class="del" onclick="del('${s.id}')" style="margin-left:6px">delete</button></div>
       ${d}
       <div class="meta">tagged ±${s.acc} m${s.note?" · "+esc(s.note):""}</div>
@@ -332,6 +333,69 @@ async function shareSpots(){
     if(e && e.name==="AbortError"){ shareStatus("share cancelled"); return; }
     shareStatus("share failed: "+((e&&(e.name+": "+e.message))||"unknown error")+" — downloading instead");
     if(data) exportJSON(data, "fishcast-spots-share.json");
+  }
+}
+
+/* ---- share one spot as a composed image card (Messages-friendly, not importable) ---- */
+function loadImg(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=src; }); }
+const FONT="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+function fitText(ctx, t, maxW){
+  if(ctx.measureText(t).width<=maxW) return t;
+  while(t.length>1 && ctx.measureText(t+"…").width>maxW) t=t.slice(0,-1);
+  return t+"…";
+}
+async function shareCard(id){
+  const s=spots.find(x=>x.id===id); if(!s) return;
+  const on=k=>{ const cb=document.getElementById(k); return cb?cb.checked:true; };
+  try{
+    shareStatus("composing card…");
+    const W=1080;
+    const cv=document.createElement("canvas"), ctx=cv.getContext("2d");
+    let H;
+    if(s.photo){
+      const img=await loadImg(s.photo);
+      H=Math.round(W*img.height/img.width);
+      cv.width=W; cv.height=H;
+      ctx.drawImage(img,0,0,W,H);
+    }else{
+      H=648; cv.width=W; cv.height=H;
+      const g=ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0,"#12283a"); g.addColorStop(1,"#071019");
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+      ctx.font="200px "+FONT; ctx.textAlign="center"; ctx.fillText("🎣", W/2, H/2);
+      ctx.textAlign="left";
+    }
+    // info panel: only what the share-includes boxes allow
+    const lines=[{t:s.label+"   ·   "+s.type.toUpperCase(), f:"700 54px", c:"#ffffff"}];
+    if(on("shNote") && s.note) lines.push({t:s.note, f:"400 40px", c:"#cfe2ee"});
+    lines.push(on("shGps")
+      ? {t:`${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}  ·  ±${s.acc} m`, f:"400 36px", c:"#8fb0c4"}
+      : {t:"Ocean Beach, San Francisco", f:"400 36px", c:"#8fb0c4"});
+    if(on("shTime")) lines.push({t:new Date(s.ts).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}), f:"400 36px", c:"#8fb0c4"});
+    const lh=l=>parseInt(l.f.match(/(\d+)px/)[1])*1.4;
+    const oh=lines.reduce((a,l)=>a+lh(l),0)+90;
+    const g2=ctx.createLinearGradient(0,H-oh-80,0,H);
+    g2.addColorStop(0,"rgba(7,16,25,0)"); g2.addColorStop(.4,"rgba(7,16,25,.82)"); g2.addColorStop(1,"rgba(7,16,25,.96)");
+    ctx.fillStyle=g2; ctx.fillRect(0,H-oh-80,W,oh+80);
+    let y=H-oh+20;
+    lines.forEach(l=>{ y+=lh(l); ctx.font=l.f+" "+FONT; ctx.fillStyle=l.c; ctx.fillText(fitText(ctx,l.t,W-96), 48, y-lh(l)*0.3); });
+    ctx.font="700 34px "+FONT; ctx.fillStyle="#37c8e6"; ctx.textAlign="right";
+    ctx.fillText("FishCast", W-40, 64); ctx.textAlign="left";
+
+    const blob=await new Promise(r=>cv.toBlob(r,"image/jpeg",0.85));
+    const file=new File([blob], (s.label||"spot").replace(/\W+/g,"-")+"-fishcast.jpg", {type:"image/jpeg"});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:s.label});
+      shareStatus("card shared ✓");
+    }else{
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob); a.download=file.name; a.click();
+      URL.revokeObjectURL(a.href);
+      shareStatus("no share sheet — card downloaded");
+    }
+  }catch(e){
+    if(e && e.name==="AbortError"){ shareStatus("share cancelled"); return; }
+    shareStatus("card failed: "+((e&&(e.name+": "+e.message))||"unknown"));
   }
 }
 
