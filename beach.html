@@ -104,7 +104,7 @@
   <div id="spots"><div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it.</div></div>
   <div style="margin-top:10px" id="exportRow"></div>
   <input type="file" id="photoAdd" accept="image/*" capture="environment" style="display:none" onchange="photoAdded(this)" />
-  <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importSpots(this)" />
+  <input type="file" id="importFile" accept=".json,.txt,application/json,text/plain" style="display:none" onchange="importSpots(this)" />
   <div class="tip">Spots live only on this device. Share sends a file to whoever <i>you</i> pick (AirDrop, email, yourself for the desktop) — import there merges without duplicates.</div>
 </div>
 
@@ -294,12 +294,31 @@ function shareFiltered(){
 
 async function shareSpots(){
   const data=shareFiltered();
-  const file=new File([JSON.stringify(data,null,2)], "fishcast-spots-share.json", {type:"application/json"});
-  if(navigator.canShare && navigator.canShare({files:[file]})){
-    try{ await navigator.share({files:[file], title:"FishCast spots"}); }
-    catch(e){ /* user cancelled the share sheet — fine */ }
-  }else{
-    exportJSON(data, "fishcast-spots-share.json");   // no share sheet (desktop) — download instead
+  const json=JSON.stringify(data,null,2);
+  // Chrome (Android) and iOS whitelist shareable file types — .json isn't on it, .txt is
+  const candidates=[
+    new File([json], "fishcast-spots-share.txt",  {type:"text/plain"}),
+    new File([json], "fishcast-spots-share.json", {type:"application/json"})
+  ];
+  try{
+    if(navigator.share){
+      for(const f of candidates){
+        if(navigator.canShare && navigator.canShare({files:[f]})){
+          await navigator.share({files:[f], title:"FishCast spots"});
+          return;
+        }
+      }
+      if(json.length<60000){   // no file sharing at all — small payloads can ride as text
+        await navigator.share({title:"FishCast spots", text:json});
+        return;
+      }
+    }
+    exportJSON(data, "fishcast-spots-share.json");
+    alertMsg("No share sheet on this device — downloaded the file instead.");
+  }catch(e){
+    if(e && e.name==="AbortError") return;           // user closed the share sheet — fine
+    exportJSON(data, "fishcast-spots-share.json");
+    alertMsg("Share failed ("+((e&&e.name)||"error")+") — downloaded the file instead.");
   }
 }
 
