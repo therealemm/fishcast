@@ -121,11 +121,16 @@
       <span><span class="big" id="tideVal">–</span> <span class="unit">ft</span></span>
       <span class="unit" id="tideState">–</span>
     </div>
+    <div class="card stat">
+      <span class="lab">Water movement · rule of 12ths</span>
+      <span><span class="big" id="flowVal">–</span> <span class="unit">ft/hr</span></span>
+      <span class="unit" id="flowSub">–</span>
+    </div>
   </div>
 
   <!-- TIDE -->
   <div class="card full">
-    <h2>Tide · next 4 days <span class="pill">NOAA station 9414290</span></h2>
+    <h2>Tide · next 4 days <span class="pill">NOAA station 9414290</span> <span class="pill" style="color:var(--accent)">cyan bands = max flow (rule of 12ths)</span></h2>
     <div class="chartwrap"><canvas id="tideChart"></canvas></div>
   </div>
 
@@ -282,6 +287,48 @@ function tideInfoAt(t){
   return {height, rising, rate, frac, lo, hi};
 }
 
+/* ---- rule of 12ths: water movement between actual hi/lo events ----
+   Each tide cycle is split into six equal parts carrying 1-2-3-3-2-1
+   twelfths of the total range; the middle two parts (hours ~3-4) move
+   half of all the water — that's the max-flow bite window. */
+const TWELFTHS = [1,2,3,3,2,1];
+
+function flowAt(t){
+  const e = DATA.hiloE;
+  let i = -1;
+  for(let k=0;k<e.length-1;k++){ if(e[k].t<=t && t<e[k+1].t){ i=k; break; } }
+  if(i<0) return null;                              // outside the hi/lo table
+  const a=e[i], b=e[i+1];
+  const cycleHrs = (b.t-a.t)/3600000;
+  const u = (t-a.t)/(b.t-a.t);                      // 0 at last event → 1 at next
+  const seg = Math.min(5, Math.floor(u*6));         // which sixth we're in (0..5)
+  const range = Math.abs(b.v-a.v);
+  const rate = range * (TWELFTHS[seg]/12) / (cycleHrs/6);   // ft/hr this sixth
+  return {
+    rate, seg, twelfths:TWELFTHS[seg], range, u,
+    rising: b.v>a.v,
+    maxFlow: seg===2 || seg===3,                    // middle two sixths = half the water
+    from:a, to:b,
+    hrsToNext: (b.t-t)/3600000
+  };
+}
+
+// max-flow spans (middle two sixths of each cycle) — for chart bands & windows
+function maxFlowSpans(){
+  const spans=[];
+  const e=DATA.hiloE;
+  for(let i=0;i<e.length-1;i++){
+    const a=e[i], b=e[i+1], dur=b.t-a.t;
+    const cycleHrs=dur/3600000, range=Math.abs(b.v-a.v);
+    spans.push({
+      start: a.t + dur*(2/6), end: a.t + dur*(4/6),
+      rising: b.v>a.v,
+      peakRate: range*(3/12)/(cycleHrs/6)
+    });
+  }
+  return spans;
+}
+
 // full condition snapshot at an arbitrary time (drives every "now" card)
 function evalAt(t){
   const m=DATA.marine.hourly, w=DATA.wind.hourly;
@@ -298,7 +345,8 @@ function evalAt(t){
     windMph: interp(DATA.windT, w.wind_speed_10m, t)*KMH2MPH,
     gustMph: interp(DATA.windT, w.wind_gusts_10m, t)*KMH2MPH,
     windDir: interp(DATA.windT, w.wind_direction_10m, t),
-    tide: tideInfoAt(t)
+    tide: tideInfoAt(t),
+    flow: flowAt(t)
   };
 }
 
@@ -314,7 +362,9 @@ async function loadAll(){
       `&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m&daily=sunrise,sunset&timezone=${CONFIG.tz}&forecast_days=4`;
     const tideCurveURL = `https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?station=${CONFIG.tideStation}`+
       `&product=predictions&datum=MLLW&time_zone=lst_ldt&units=english&interval=h&format=json&begin_date=${ymd(today)}&end_date=${ymd(end)}`;
-    const tideHiloURL = tideCurveURL.replace("interval=h","interval=hilo");
+    // hilo starts a day early so the rule-of-12ths always has a bracketing event before "now"
+    const tideHiloURL = tideCurveURL.replace("interval=h","interval=hilo")
+      .replace(`begin_date=${ymd(today)}`, `begin_date=${ymd(new Date(Date.now()-86400000))}`);
 
     const [marine, wind, tideCurve, tideHilo] = await Promise.all([
       getJSON(marineURL), getJSON(windURL), getJSON(tideCurveURL), getJSON(tideHiloURL)
@@ -326,7 +376,10 @@ async function loadAll(){
       marineT: marine.hourly.time.map(s=>new Date(s).getTime()),
       windT:   wind.hourly.time.map(s=>new Date(s).getTime()),
       tideT:   tideCurve.predictions.map(p=>new Date(p.t.replace(" ","T")).getTime()),
-      tideV:   tideCurve.predictions.map(p=>+p.v)
+      tideV:   tideCurve.predictions.map(p=>+p.v),
+      hiloE:   tideHilo.predictions
+                 .map(p=>({t:new Date(p.t.replace(" ","T")).getTime(), v:+p.v, type:p.type}))
+                 .sort((a,b)=>a.t-b.t)
     };
 
     renderTide(tideCurve, tideHilo);
@@ -428,6 +481,18 @@ function renderConditions(c){
   document.getElementById("tideState").textContent =
     (c.tide.rising?"▲ rising":"▼ falling")+` · ${c.tide.rate.toFixed(1)} ft/hr`;
 
+  const f=c.flow, fv=document.getElementById("flowVal"), fs=document.getElementById("flowSub");
+  if(f){
+    fv.textContent = f.rate.toFixed(1);
+    fv.style.color = f.maxFlow ? "var(--good)" : "";
+    fs.innerHTML =
+      `${f.twelfths}/12 this hour · hour ${f.seg+1} of 6 (${f.rising?"flood":"ebb"})`+
+      (f.maxFlow ? ` · <b style="color:var(--good)">MAX FLOW — bite window</b>`
+                 : f.seg===0||f.seg===5 ? " · slack-ish, water barely moving" : "");
+  }else{
+    fv.textContent="–"; fv.style.color=""; fs.textContent="outside tide table";
+  }
+
   // gear call
   const g=gearVerdict(c.windMph, c.waveFt, c.chopFt);
   const ge=document.getElementById("verdict"); ge.className="card verdict "+g.cls;
@@ -451,10 +516,33 @@ function gearVerdict(windMph, waveFt, chopFt){
 }
 
 /* ---- tide chart ---- */
+// shaded bands where the rule of 12ths says half the water moves (middle 2 hours of each cycle)
+const flowBands = {
+  id:"flowBands",
+  beforeDatasetsDraw(c){
+    if(!DATA || !DATA.hiloE) return;
+    const ctx=c.ctx, area=c.chartArea;
+    ctx.save();
+    maxFlowSpans().forEach(s=>{
+      const x1=clamp(c.scales.x.getPixelForValue(s.start), area.left, area.right);
+      const x2=clamp(c.scales.x.getPixelForValue(s.end),   area.left, area.right);
+      if(x2<=x1) return;
+      ctx.fillStyle="rgba(55,200,230,.10)";
+      ctx.fillRect(x1, area.top, x2-x1, area.bottom-area.top);
+      if(x2-x1>34){
+        ctx.fillStyle="rgba(55,200,230,.75)"; ctx.font="9px sans-serif"; ctx.textAlign="center";
+        ctx.fillText("max flow", (x1+x2)/2, area.top+10);
+      }
+    });
+    ctx.restore();
+  }
+};
+
 function renderTide(curve, hilo){
   const pts = curve.predictions.map(p=>({x:new Date(p.t.replace(" ","T")).getTime(), y:+p.v}));
-  const hi = hilo.predictions.filter(p=>p.type==="H").map(p=>({x:new Date(p.t.replace(" ","T")).getTime(), y:+p.v}));
-  const lo = hilo.predictions.filter(p=>p.type==="L").map(p=>({x:new Date(p.t.replace(" ","T")).getTime(), y:+p.v}));
+  const t0 = pts.length ? pts[0].x : 0;   // hilo is fetched a day early — keep the chart to the curve's range
+  const hi = hilo.predictions.filter(p=>p.type==="H").map(p=>({x:new Date(p.t.replace(" ","T")).getTime(), y:+p.v})).filter(p=>p.x>=t0);
+  const lo = hilo.predictions.filter(p=>p.type==="L").map(p=>({x:new Date(p.t.replace(" ","T")).getTime(), y:+p.v})).filter(p=>p.x>=t0);
   makeChart("tideChart", {
     type:"line",
     data:{ datasets:[
@@ -467,7 +555,7 @@ function renderTide(curve, hilo){
     options:{ maintainAspectRatio:false, plugins:{legend:{display:false},
       tooltip:{callbacks:{label:ctx=>`${ctx.parsed.y.toFixed(1)} ft`, title:items=>new Date(items[0].parsed.x).toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})}}},
       scales:{x:xAxis, y:{title:{display:true,text:"ft (MLLW)"}}} },
-    plugins:[nowLine, scrubLine]
+    plugins:[flowBands, nowLine, scrubLine]
   });
 }
 
@@ -628,6 +716,22 @@ function renderWindows(hilo, wind){
     const prime = lit && score<60;                 // PRIME only if wadeable AND low light
     items.push({ t, label:(high?"High":"Low")+` tide · ${(+p.v).toFixed(1)} ft`, tip, prime, lit, wadeEmoji, score });
   });
+
+  // rule-of-12ths max-flow windows — half the water moves in these two hours
+  maxFlowSpans().forEach(s=>{
+    const mid=(s.start+s.end)/2;
+    if(s.end<now-3600000 || mid>horizon) return;
+    const cond=evalAt(mid);
+    const {score}=computeWadeScore(cond.power, cond.setFt, cond.tide);
+    const wadeEmoji = score<30?"🟢":score<60?"🟡":"🔴";
+    const lit = lowLight(mid);
+    items.push({
+      t: s.start, mid, end: s.end,
+      label:`Max flow (${s.rising?"flood":"ebb"}) · until ${fmtTime(new Date(s.end))} · peak ~${s.peakRate.toFixed(1)} ft/hr`,
+      tip:"Middle two hours of the cycle — 6/12 of the water moves now. Current sweeps bait through troughs and rips; fish the seams.",
+      prime: lit && score<60, lit, wadeEmoji, score, flow:true
+    });
+  });
   items.sort((a,b)=>a.t-b.t);
   const ul=document.getElementById("windowList");
   ul.innerHTML = items.length ? "" : "<li>No tide events in window.</li>";
@@ -635,6 +739,7 @@ function renderWindows(hilo, wind){
     const d=new Date(it.t);
     const li=document.createElement("li");
     if(it.prime) li.className="prime";
+    else if(it.flow) li.style.borderLeftColor="var(--accent)";
     li.innerHTML = `<span class="when">${fmtDay(d)} ${fmtTime(d)}</span> — ${it.label} `+
       `<span class="pill">wade ${it.wadeEmoji} ${it.score}</span>`+
       (it.prime?` <span class="pill" style="border-color:var(--good);color:var(--good)">PRIME · low light</span>`
