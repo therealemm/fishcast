@@ -83,10 +83,15 @@
 <div class="grid">
   <!-- TIME SCRUBBER -->
   <div class="card full" id="scrubBar">
+    <div id="skyStrip" style="position:relative;height:46px;border-radius:10px;overflow:hidden;margin-bottom:12px;border:1px solid var(--line);background:#0c1e2b">
+      <span id="skyOrb" style="position:absolute;font-size:19px;transform:translate(-50%,-50%);left:-40px;top:50%">☀️</span>
+      <div style="position:absolute;left:0;right:0;bottom:0;height:12px;background:linear-gradient(180deg,transparent,#0a1721cc)"></div>
+    </div>
     <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
       <div style="min-width:150px">
         <span class="lab" style="font-size:.72rem;letter-spacing:1px;color:var(--dim)">Conditions at</span>
         <div id="scrubLabel" style="font-size:1.15rem;font-weight:700">now</div>
+        <span class="pill" id="fishBadge" style="margin-top:4px">fishiness –</span>
       </div>
       <input id="timeSlider" type="range" style="flex:1;min-width:220px;accent-color:var(--accent)" />
       <button onclick="snapNow()">⟲ now</button>
@@ -131,6 +136,13 @@
       <span><span class="big" id="sstVal">–</span> <span class="unit">°F</span></span>
       <span class="unit" id="sstSub">–</span>
     </div>
+  </div>
+
+  <!-- FISHINESS -->
+  <div class="card full">
+    <h2>Fishiness · next 4 days <span class="pill">flow + light + wade + stir + wind</span> <span id="fishDays"></span></h2>
+    <div class="chartwrap" style="height:170px"><canvas id="fishChart"></canvas></div>
+    <div class="sub" style="margin-top:6px">Click a day pill to jump the scrubber to that day's fishiest moment.</div>
   </div>
 
   <!-- TIDE -->
@@ -411,6 +423,7 @@ async function loadAll(){
     renderMoon();
     renderLight();
     renderWindows(tideHilo, wind);
+    renderFishiness();
     renderPhase();              // surf-regime phase diagram
     setupSlider();              // sets scrubTime=now and renders the cards
 
@@ -441,6 +454,7 @@ function snapNow(){
 let rafPending=false;
 function onScrub(){
   renderConditions(evalAt(scrubTime));
+  updateSky(scrubTime);
   updatePhaseMarker();
   if(!rafPending){ rafPending=true; requestAnimationFrame(()=>{ rafPending=false; for(const k in charts) charts[k].update("none"); }); }
 }
@@ -490,6 +504,10 @@ function renderConditions(c){
   const isNow=Math.abs(c.time-Date.now())<30*60000;
   document.getElementById("scrubLabel").textContent =
     isNow ? "now" : d.toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"});
+
+  const fsc=fishiness(c.time), fb=document.getElementById("fishBadge");
+  fb.textContent=`🎣 fishiness ${fsc} · ${grade(fsc)}`;
+  fb.style.borderColor=gradeColor(fsc); fb.style.color=gradeColor(fsc);
 
   document.getElementById("powerVal").textContent = c.power.toFixed(1);
   document.getElementById("powerSub").innerHTML =
@@ -559,14 +577,18 @@ const nightShade = {
     const px=t=>clamp(c.scales.x.getPixelForValue(t), area.left, area.right);
     const band=(t1,t2,fill)=>{ const x1=px(t1), x2=px(t2); if(x2>x1){ ctx.fillStyle=fill; ctx.fillRect(x1,area.top,x2-x1,area.bottom-area.top); } };
     ctx.save();
+    const opts=(c.options.plugins&&c.options.plugins.nightShade)||{};
+    const nightFill=`rgba(2,8,14,${opts.subtle?".28":".45"})`;
     const s=DATA.suns;
     // night: chart start → first sunrise, then each sunset → next sunrise
-    band(-Infinity, s[0].rise, "rgba(2,8,14,.45)");
-    for(let i=0;i<s.length;i++) band(s[i].set, s[i+1]?s[i+1].rise:Infinity, "rgba(2,8,14,.45)");
+    band(-Infinity, s[0].rise, nightFill);
+    for(let i=0;i<s.length;i++) band(s[i].set, s[i+1]?s[i+1].rise:Infinity, nightFill);
     // low-light bite windows (±75 min of sunrise/sunset — matches the PRIME scoring)
-    const LL=75*60000;
-    s.forEach(d=>{ band(d.rise-LL, d.rise+LL, "rgba(240,180,41,.08)");
-                   band(d.set-LL,  d.set+LL,  "rgba(240,180,41,.08)"); });
+    if(!opts.noLowlight){
+      const LL=75*60000;
+      s.forEach(d=>{ band(d.rise-LL, d.rise+LL, "rgba(240,180,41,.08)");
+                     band(d.set-LL,  d.set+LL,  "rgba(240,180,41,.08)"); });
+    }
     ctx.restore();
   }
 };
@@ -609,6 +631,7 @@ function renderTide(curve, hilo){
       {data:lo, type:"scatter", pointBackgroundColor:"#f0b429", pointRadius:4, label:"low"}
     ]},
     options:{ maintainAspectRatio:false, plugins:{legend:{display:false},
+      nightShade:{noLowlight:true, subtle:true},   // tide chart was getting busy — flow bands + soft night only
       tooltip:{callbacks:{label:ctx=>`${ctx.parsed.y.toFixed(1)} ft`, title:items=>new Date(items[0].parsed.x).toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})}}},
       scales:{x:xAxis, y:{title:{display:true,text:"ft (MLLW)"}}} },
     plugins:[nightShade, flowBands, nowLine, scrubLine]
@@ -737,6 +760,96 @@ function updatePhaseMarker(){
   fg.beginPath(); fg.arc(x,y,8,0,2*Math.PI); fg.strokeStyle="#0a1721"; fg.lineWidth=4; fg.stroke();
   fg.beginPath(); fg.arc(x,y,8,0,2*Math.PI); fg.strokeStyle="#fff"; fg.lineWidth=2; fg.stroke();
   fg.beginPath(); fg.arc(x,y,3.5,0,2*Math.PI); fg.fillStyle="#37c8e6"; fg.fill();
+}
+
+/* ---- fishiness score ---- */
+// light quality: dawn/dusk = 1, daylight = 0.5, dark night = 0.1 (+ a bit if the moon is bright)
+function lightQuality(t){
+  const LL=75*60000;
+  for(const d of DATA.suns){ if(Math.abs(t-d.rise)<LL || Math.abs(t-d.set)<LL) return 1; }
+  for(const d of DATA.suns){ if(t>=d.rise && t<d.set) return 0.5; }
+  return 0.1 + 0.3*moon(new Date(t)).illum;
+}
+function fishiness(t){
+  const c=evalAt(t);
+  const w=computeWadeScore(c.power, c.setFt, c.tide).score;
+  let s=0;
+  s += 35*(c.flow ? clamp(c.flow.rate/1.2, 0, 1) : 0);   // moving water (rule of 12ths)
+  s += 25*lightQuality(t);                                // dawn/dusk >> day >> dark night
+  s += 20*clamp((70-w)/70, 0, 1);                         // has to be wadeable
+  s += 10*(1-Math.exp(-c.power/4));                       // enough energy to stir bait
+  s += 10*clamp((18-c.windMph)/18, 0, 1);                 // castable wind
+  return Math.round(clamp(s,0,100));
+}
+const grade      = v => v>=80?"A":v>=62?"B":v>=45?"C":"D";
+const gradeColor = v => v>=80?"#3ddc84":v>=62?"#f0b429":v>=45?"#e8935a":"#ff6b6b";
+
+function scrubTo(t){
+  const s=document.getElementById("timeSlider");
+  scrubTime=clamp(t, +s.min, +s.max); s.value=scrubTime; onScrub();
+}
+
+function renderFishiness(){
+  const t0=Date.now(), t1=Math.min(DATA.marineT.at(-1), DATA.windT.at(-1), DATA.tideT.at(-1));
+  const pts=[]; for(let t=t0; t<=t1; t+=1800000) pts.push({x:t, y:fishiness(t)});
+  // best moment of each day → clickable grade pills
+  const byDay={};
+  pts.forEach(p=>{ const k=new Date(p.x).toDateString(); if(!byDay[k] || p.y>byDay[k].y) byDay[k]=p; });
+  const peaks=Object.values(byDay);
+  document.getElementById("fishDays").innerHTML = peaks.map(p=>{
+    const col=gradeColor(p.y), d=new Date(p.x);
+    return `<span class="pill" style="cursor:pointer;border-color:${col};color:${col}" onclick="scrubTo(${p.x})">`+
+           `${fmtDay(d)} ${grade(p.y)} · ${fmtTime(d)}</span>`;
+  }).join(" ");
+  makeChart("fishChart", {
+    type:"line",
+    data:{ datasets:[
+      {data:pts, pointRadius:0, borderWidth:2, tension:.3, fill:true,
+        segment:{ borderColor: ctx=>gradeColor((ctx.p0.parsed.y+ctx.p1.parsed.y)/2),
+                  backgroundColor: ctx=>gradeColor((ctx.p0.parsed.y+ctx.p1.parsed.y)/2).replace("rgb","rgba").replace(")",",.12)") }},
+      {data:peaks, type:"scatter", pointRadius:4, pointBackgroundColor:peaks.map(p=>gradeColor(p.y))}
+    ]},
+    options:{ maintainAspectRatio:false,
+      plugins:{legend:{display:false},
+        tooltip:{callbacks:{label:ctx=>`fishiness ${ctx.parsed.y} (${grade(ctx.parsed.y)})`,
+          title:items=>new Date(items[0].parsed.x).toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})}}},
+      scales:{x:xAxis, y:{min:0, max:100}} },
+    plugins:[nightShade, nowLine, scrubLine]
+  });
+}
+
+/* ---- scrubber sky: sun arcs by day, phase-correct moon by night ---- */
+function skyColor(alt){
+  const nt=[5,13,24], dy=[42,96,138], tw=[152,92,44];       // night, day, twilight RGB
+  const k=clamp((alt+0.2)/0.6, 0, 1);
+  let c=nt.map((v,i)=>v+(dy[i]-v)*k);
+  const a=Math.exp(-Math.pow(alt/0.15,2))*0.55;             // amber glow near the horizon
+  c=c.map((v,i)=>v+(tw[i]-v)*a);
+  return `rgb(${c.map(v=>v|0).join(",")})`;
+}
+function updateSky(t){
+  if(!DATA || !DATA.suns.length) return;
+  const strip=document.getElementById("skyStrip"), orb=document.getElementById("skyOrb");
+  const s=DATA.suns;
+  let day=null;
+  for(const d of s){ if(t>=d.rise && t<d.set){ day=d; break; } }
+  let u, face, alt;
+  if(day){
+    u=(t-day.rise)/(day.set-day.rise); face="☀️"; alt=Math.sin(Math.PI*u);
+  }else{
+    let set=null, rise=null;
+    for(const d of s){ if(d.set<=t) set=d.set; }
+    for(let i=s.length-1;i>=0;i--){ if(s[i].rise>t) rise=s[i].rise; }
+    if(set==null) set=(rise??t)-10*3600000;
+    if(rise==null) rise=set+10*3600000;
+    u=clamp((t-set)/(rise-set), 0, 1);
+    face=moon(new Date(t)).face; alt=-Math.sin(Math.PI*u);
+  }
+  const W=strip.clientWidth;
+  orb.textContent=face;
+  orb.style.left=(12+u*(W-24))+"px";
+  orb.style.top=(38-26*Math.sin(Math.PI*u))+"px";
+  strip.style.background=`linear-gradient(180deg, ${skyColor(alt)} 0%, #0a1721 115%)`;
 }
 
 /* ---- light ---- */
