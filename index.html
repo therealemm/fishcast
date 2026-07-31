@@ -126,6 +126,11 @@
       <span><span class="big" id="flowVal">–</span> <span class="unit">ft/hr</span></span>
       <span class="unit" id="flowSub">–</span>
     </div>
+    <div class="card stat">
+      <span class="lab">Water temp</span>
+      <span><span class="big" id="sstVal">–</span> <span class="unit">°F</span></span>
+      <span class="unit" id="sstSub">–</span>
+    </div>
   </div>
 
   <!-- TIDE -->
@@ -154,6 +159,13 @@
       <canvas id="phaseFg" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
     </div>
     <div class="sub" style="margin-top:8px">Green = wadeable &amp; enough chop to stir bait · red = too rough (worse at long period). White path = next 36 h; the cyan dot is your scrubbed time.</div>
+  </div>
+
+  <!-- LIGHT -->
+  <div class="card">
+    <h2>Light</h2>
+    <div style="font-size:1.05rem;line-height:2;text-align:center" id="lightToday">–</div>
+    <div class="moonmeta" id="lightWindows">–</div>
   </div>
 
   <!-- MOON -->
@@ -346,7 +358,9 @@ function evalAt(t){
     gustMph: interp(DATA.windT, w.wind_gusts_10m, t)*KMH2MPH,
     windDir: interp(DATA.windT, w.wind_direction_10m, t),
     tide: tideInfoAt(t),
-    flow: flowAt(t)
+    flow: flowAt(t),
+    sstF: DATA.sstT.length ? interp(DATA.sstT, DATA.sstV, t) : null,
+    sstWeekAgo: DATA.sstT.length ? interp(DATA.sstT, DATA.sstV, t-7*86400000) : null
   };
 }
 
@@ -366,8 +380,12 @@ async function loadAll(){
     const tideHiloURL = tideCurveURL.replace("interval=h","interval=hilo")
       .replace(`begin_date=${ymd(today)}`, `begin_date=${ymd(new Date(Date.now()-86400000))}`);
 
-    const [marine, wind, tideCurve, tideHilo] = await Promise.all([
-      getJSON(marineURL), getJSON(windURL), getJSON(tideCurveURL), getJSON(tideHiloURL)
+    // separate SST call so past_days doesn't drag the swell charts a week into the past
+    const sstURL = `https://marine-api.open-meteo.com/v1/marine?latitude=${CONFIG.lat}&longitude=${CONFIG.lon}`+
+      `&hourly=sea_surface_temperature&past_days=7&forecast_days=4&timezone=${CONFIG.tz}`;
+
+    const [marine, wind, tideCurve, tideHilo, sst] = await Promise.all([
+      getJSON(marineURL), getJSON(windURL), getJSON(tideCurveURL), getJSON(tideHiloURL), getJSON(sstURL)
     ]);
 
     // build aligned time bases for interpolation
@@ -379,13 +397,19 @@ async function loadAll(){
       tideV:   tideCurve.predictions.map(p=>+p.v),
       hiloE:   tideHilo.predictions
                  .map(p=>({t:new Date(p.t.replace(" ","T")).getTime(), v:+p.v, type:p.type}))
-                 .sort((a,b)=>a.t-b.t)
+                 .sort((a,b)=>a.t-b.t),
+      ...(()=>{ const pairs=sst.hourly.time
+                  .map((s,i)=>({t:new Date(s).getTime(), v:sst.hourly.sea_surface_temperature[i]}))
+                  .filter(p=>p.v!=null);
+                return {sstT:pairs.map(p=>p.t), sstV:pairs.map(p=>p.v*9/5+32)}; })(),
+      suns:    wind.daily.sunrise.map((s,i)=>({rise:new Date(s).getTime(), set:new Date(wind.daily.sunset[i]).getTime()}))
     };
 
     renderTide(tideCurve, tideHilo);
     renderWind(wind);
     renderSwell(marine);
     renderMoon();
+    renderLight();
     renderWindows(tideHilo, wind);
     renderPhase();              // surf-regime phase diagram
     setupSlider();              // sets scrubTime=now and renders the cards
@@ -493,6 +517,17 @@ function renderConditions(c){
     fv.textContent="–"; fv.style.color=""; fs.textContent="outside tide table";
   }
 
+  const sv=document.getElementById("sstVal"), ss=document.getElementById("sstSub");
+  if(c.sstF!=null){
+    sv.textContent = c.sstF.toFixed(1);
+    const d = c.sstWeekAgo!=null ? c.sstF-c.sstWeekAgo : 0;
+    const band = c.sstF>=60 ? "warm — prime striper water"
+               : c.sstF>=55 ? "solid striper range"
+               : c.sstF>=50 ? "cool — slower bite"
+               : "cold — deep troughs, slow it down";
+    ss.textContent = `${d>=0?"▲":"▼"} ${Math.abs(d).toFixed(1)}° vs last week · ${band}`;
+  }else{ sv.textContent="–"; ss.textContent="no SST data"; }
+
   // gear call
   const g=gearVerdict(c.windMph, c.waveFt, c.chopFt);
   const ge=document.getElementById("verdict"); ge.className="card verdict "+g.cls;
@@ -514,6 +549,27 @@ function gearVerdict(windMph, waveFt, chopFt){
     return {label:"EITHER — fly if keen", cls:"mid", note:`Breezy (${windMph.toFixed(0)} mph). Fly is a fight; conventional is comfortable.`};
   return {label:"🪝 CONVENTIONAL", cls:"rough", note:`Too rough for fly (${windMph.toFixed(0)} mph wind, ${waveFt.toFixed(1)} ft surf). Go heavy.`};
 }
+
+/* ---- night & low-light shading (all time charts) ---- */
+const nightShade = {
+  id:"nightShade",
+  beforeDatasetsDraw(c){
+    if(!DATA || !DATA.suns || !DATA.suns.length) return;
+    const ctx=c.ctx, area=c.chartArea;
+    const px=t=>clamp(c.scales.x.getPixelForValue(t), area.left, area.right);
+    const band=(t1,t2,fill)=>{ const x1=px(t1), x2=px(t2); if(x2>x1){ ctx.fillStyle=fill; ctx.fillRect(x1,area.top,x2-x1,area.bottom-area.top); } };
+    ctx.save();
+    const s=DATA.suns;
+    // night: chart start → first sunrise, then each sunset → next sunrise
+    band(-Infinity, s[0].rise, "rgba(2,8,14,.45)");
+    for(let i=0;i<s.length;i++) band(s[i].set, s[i+1]?s[i+1].rise:Infinity, "rgba(2,8,14,.45)");
+    // low-light bite windows (±75 min of sunrise/sunset — matches the PRIME scoring)
+    const LL=75*60000;
+    s.forEach(d=>{ band(d.rise-LL, d.rise+LL, "rgba(240,180,41,.08)");
+                   band(d.set-LL,  d.set+LL,  "rgba(240,180,41,.08)"); });
+    ctx.restore();
+  }
+};
 
 /* ---- tide chart ---- */
 // shaded bands where the rule of 12ths says half the water moves (middle 2 hours of each cycle)
@@ -555,7 +611,7 @@ function renderTide(curve, hilo){
     options:{ maintainAspectRatio:false, plugins:{legend:{display:false},
       tooltip:{callbacks:{label:ctx=>`${ctx.parsed.y.toFixed(1)} ft`, title:items=>new Date(items[0].parsed.x).toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})}}},
       scales:{x:xAxis, y:{title:{display:true,text:"ft (MLLW)"}}} },
-    plugins:[flowBands, nowLine, scrubLine]
+    plugins:[nightShade, flowBands, nowLine, scrubLine]
   });
 }
 
@@ -574,7 +630,7 @@ function renderWind(wind){
       plugins:{legend:{display:true, labels:{boxWidth:12}},
         tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)} mph`}}},
       scales:{x:xAxis, y:{title:{display:true,text:"mph"}, beginAtZero:true}} },
-    plugins:[nowLine, scrubLine]
+    plugins:[nightShade, nowLine, scrubLine]
   });
 }
 
@@ -596,7 +652,7 @@ function renderSwell(marine){
       scales:{x:xAxis,
         y:{position:"left", title:{display:true,text:"kW/m"}, beginAtZero:true},
         y1:{position:"right", title:{display:true,text:"ft"}, beginAtZero:true, grid:{drawOnChartArea:false}}} },
-    plugins:[nowLine, scrubLine]
+    plugins:[nightShade, nowLine, scrubLine]
   });
 }
 
@@ -681,6 +737,22 @@ function updatePhaseMarker(){
   fg.beginPath(); fg.arc(x,y,8,0,2*Math.PI); fg.strokeStyle="#0a1721"; fg.lineWidth=4; fg.stroke();
   fg.beginPath(); fg.arc(x,y,8,0,2*Math.PI); fg.strokeStyle="#fff"; fg.lineWidth=2; fg.stroke();
   fg.beginPath(); fg.arc(x,y,3.5,0,2*Math.PI); fg.fillStyle="#37c8e6"; fg.fill();
+}
+
+/* ---- light ---- */
+function renderLight(){
+  const now=Date.now();
+  // today's entry (or the next one if we're past today's sunset)
+  const today = DATA.suns.find(d=>d.set>now) || DATA.suns.at(-1);
+  document.getElementById("lightToday").innerHTML =
+    `🌅 rise <b>${fmtTime(new Date(today.rise))}</b> &nbsp;·&nbsp; 🌇 set <b>${fmtTime(new Date(today.set))}</b>`;
+  // next low-light bite window (±75 min around rise/set)
+  const LL=75*60000;
+  const edges = DATA.suns.flatMap(d=>[d.rise,d.set]).sort((a,b)=>a-b);
+  const next = edges.find(e=>e+LL>now);
+  document.getElementById("lightWindows").innerHTML = next
+    ? `next low-light window<br><b>${fmtDay(new Date(next))} ${fmtTime(new Date(next-LL))} – ${fmtTime(new Date(next+LL))}</b>`
+    : "–";
 }
 
 /* ---- moon ---- */
