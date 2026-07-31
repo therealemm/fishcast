@@ -42,6 +42,9 @@
   .spot .del{width:auto;padding:6px 10px;font-size:.75rem;margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--dim)}
   .empty{color:var(--dim);font-size:.9rem}
   .tip{font-size:.78rem;color:var(--dim);margin-top:10px;line-height:1.5}
+  .thumb{width:64px;height:64px;object-fit:cover;border-radius:8px;cursor:pointer;display:block;margin-top:8px}
+  .thumb.big{width:100%;height:auto}
+  input[type=file]{padding:8px;font-size:.85rem}
 </style>
 </head>
 <body>
@@ -89,6 +92,8 @@
   </div>
   <label class="field">Note (optional)</label>
   <input id="note" placeholder="depth, foam line, structure…" />
+  <label class="field">Photo (optional)</label>
+  <input type="file" id="photo" accept="image/*" capture="environment" />
   <div style="margin-top:12px"><button class="btn-tag" id="tagBtn" onclick="tagHere()" disabled>⛳ Tag here</button></div>
   <div class="tip" id="tagTip">Enable GPS first. Tip: wait for accuracy to settle (green) before tagging — and it stores the accuracy with each spot.</div>
 </div>
@@ -98,6 +103,9 @@
   <h2>Saved spots <span id="count" style="color:var(--dim)"></span></h2>
   <div id="spots"><div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it.</div></div>
   <div style="margin-top:10px" id="exportRow"></div>
+  <input type="file" id="photoAdd" accept="image/*" capture="environment" style="display:none" onchange="photoAdded(this)" />
+  <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="importSpots(this)" />
+  <div class="tip">Spots live only on this device. Share sends a file to whoever <i>you</i> pick (AirDrop, email, yourself for the desktop) — import there merges without duplicates.</div>
 </div>
 
 <script>
@@ -106,7 +114,43 @@ let watchId=null, last=null;
 let spots = load();
 
 function load(){ try{ return JSON.parse(localStorage.getItem(KEY)||"[]"); }catch(e){ return []; } }
-function persist(){ localStorage.setItem(KEY, JSON.stringify(spots)); }
+function persist(){
+  try{ localStorage.setItem(KEY, JSON.stringify(spots)); }
+  catch(e){  // storage full — drop the oldest photos until it fits, keep the spots themselves
+    const withPhotos=spots.filter(s=>s.photo).sort((a,b)=>a.ts-b.ts);
+    if(!withPhotos.length) throw e;
+    delete withPhotos[0].photo;
+    persist();
+    setStatus("storage full — dropped the oldest photo to make room");
+  }
+}
+
+/* ---- photos: downscale to ~900px JPEG so dozens fit in localStorage ---- */
+function shrinkPhoto(file){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(file), img=new Image();
+    img.onload=()=>{
+      const scale=Math.min(1, 900/Math.max(img.width,img.height));
+      const cv=document.createElement("canvas");
+      cv.width=Math.round(img.width*scale); cv.height=Math.round(img.height*scale);
+      cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);
+      URL.revokeObjectURL(url);
+      res(cv.toDataURL("image/jpeg",0.65));
+    };
+    img.onerror=()=>{ URL.revokeObjectURL(url); rej(new Error("couldn't read photo")); };
+    img.src=url;
+  });
+}
+let photoTarget=null;
+function addPhoto(id){ photoTarget=id; document.getElementById("photoAdd").click(); }
+async function photoAdded(inp){
+  const f=inp.files[0]; inp.value="";
+  if(!f || !photoTarget) return;
+  const s=spots.find(x=>x.id===photoTarget); photoTarget=null;
+  if(!s) return;
+  s.photo=await shrinkPhoto(f);
+  persist(); renderSpots();
+}
 
 /* ---- geolocation ---- */
 function startGPS(){
@@ -141,18 +185,21 @@ function onErr(e){
 }
 
 /* ---- tagging ---- */
-function tagHere(){
+async function tagHere(){
   if(!last){ setStatus("no fix yet"); return; }
   const type=document.getElementById("type").value;
   const label=document.getElementById("label").value.trim() || (type+" "+(spots.length+1));
-  spots.push({
+  const spot={
     id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
     label, type,
     note: document.getElementById("note").value.trim(),
     lat:last.latitude, lon:last.longitude, acc:Math.round(last.accuracy),
     alt: last.altitude!=null ? Math.round(last.altitude) : null,
     ts: Date.now()
-  });
+  };
+  const ph=document.getElementById("photo");
+  if(ph.files[0]){ try{ spot.photo=await shrinkPhoto(ph.files[0]); }catch(e){} ph.value=""; }
+  spots.push(spot);
   persist();
   document.getElementById("label").value=""; document.getElementById("note").value="";
   renderSpots();
@@ -177,8 +224,10 @@ const compass=deg=>["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WS
 function renderSpots(){
   document.getElementById("count").textContent = spots.length ? `(${spots.length})` : "";
   const wrap=document.getElementById("spots");
-  if(!spots.length){ wrap.innerHTML='<div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it.</div>';
-    document.getElementById("exportRow").innerHTML=""; return; }
+  if(!spots.length){ wrap.innerHTML='<div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it — or import a file from your phone.</div>';
+    document.getElementById("exportRow").innerHTML=
+      '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import spots (JSON)</button>';
+    return; }
 
   // compute live distance if we have a fix
   const list = spots.map(s=>{
@@ -197,21 +246,87 @@ function renderSpots(){
       : `<div class="meta">enable GPS to see distance</div>`;
     return `<div class="spot">
       <div class="top"><span class="name">${esc(s.label)}</span><span class="type">${s.type}</span>
-        <button class="del" onclick="del('${s.id}')">delete</button></div>
+        <button class="del" onclick="addPhoto('${s.id}')">📷</button>
+        <button class="del" onclick="del('${s.id}')" style="margin-left:6px">delete</button></div>
       ${d}
       <div class="meta">tagged ±${s.acc} m${s.note?" · "+esc(s.note):""}</div>
+      ${s.photo?`<img class="thumb" src="${s.photo}" onclick="this.classList.toggle('big')" alt="${esc(s.label)}" />`:""}
     </div>`;
   }).join("");
 
-  document.getElementById("exportRow").innerHTML='<button class="btn-ghost" onclick="exportJSON()">⬇ Export spots (JSON)</button>';
+  // share filters survive re-render
+  const keep=Object.fromEntries(["shGps","shTime","shNote","shPhoto"].map(id=>{
+    const cb=document.getElementById(id); return [id, cb?cb.checked:true]; }));
+  document.getElementById("exportRow").innerHTML=
+    '<div class="tip" style="margin:0 0 8px;display:flex;gap:14px;flex-wrap:wrap">share includes:'+
+    [["shGps","exact GPS"],["shTime","times"],["shNote","notes"],["shPhoto","photos"]].map(([id,lab])=>
+      `<label style="display:inline-flex;gap:5px;align-items:center;cursor:pointer">`+
+      `<input type="checkbox" id="${id}" ${keep[id]?"checked":""} style="width:auto;accent-color:var(--accent)">${lab}</label>`).join("")+
+    '</div>'+
+    '<div class="row">'+
+    '<button class="btn-ghost" onclick="shareSpots()">📤 Share</button>'+
+    '<button class="btn-ghost" onclick="exportJSON(spots,\'fishcast-spots.json\')">⬇ Full backup</button>'+
+    '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import</button>'+
+    '</div>';
 }
 function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
 
-function exportJSON(){
-  const blob=new Blob([JSON.stringify(spots,null,2)],{type:"application/json"});
+function exportJSON(data, name){
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const a=document.createElement("a");
-  a.href=URL.createObjectURL(blob); a.download="fishcast-spots.json"; a.click();
+  a.href=URL.createObjectURL(blob); a.download=name; a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// honor the share-includes checkboxes — what's unchecked never leaves the device
+function shareFiltered(){
+  const on=id=>{ const cb=document.getElementById(id); return cb?cb.checked:true; };
+  return spots.map(s=>{
+    const o={id:s.id, label:s.label, type:s.type};
+    if(on("shGps")){ o.lat=s.lat; o.lon=s.lon; o.acc=s.acc; if(s.alt!=null) o.alt=s.alt; }
+    else{ o.lat=+s.lat.toFixed(2); o.lon=+s.lon.toFixed(2); o.approx=true; o.area="Ocean Beach, SF"; }  // ~1 km fuzz
+    if(on("shTime")) o.ts=s.ts;
+    if(on("shNote") && s.note) o.note=s.note;
+    if(on("shPhoto") && s.photo) o.photo=s.photo;
+    return o;
+  });
+}
+
+async function shareSpots(){
+  const data=shareFiltered();
+  const file=new File([JSON.stringify(data,null,2)], "fishcast-spots-share.json", {type:"application/json"});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file], title:"FishCast spots"}); }
+    catch(e){ /* user cancelled the share sheet — fine */ }
+  }else{
+    exportJSON(data, "fishcast-spots-share.json");   // no share sheet (desktop) — download instead
+  }
+}
+
+function importSpots(inp){
+  const f=inp.files[0]; inp.value="";
+  if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    let incoming;
+    try{ incoming=JSON.parse(r.result); }catch(e){ alertMsg("That file isn't valid JSON."); return; }
+    if(!Array.isArray(incoming)){ alertMsg("That file isn't a FishCast spots export."); return; }
+    const have=new Set(spots.map(s=>s.id));
+    let added=0, skipped=0;
+    incoming.forEach(s=>{
+      if(!s || typeof s.lat!=="number" || typeof s.lon!=="number" || !s.id){ skipped++; return; }
+      if(have.has(s.id)){ skipped++; return; }
+      spots.push(s); have.add(s.id); added++;
+    });
+    persist(); renderSpots();
+    alertMsg(`Imported ${added} spot${added===1?"":"s"}${skipped?` (${skipped} skipped — duplicates or invalid)`:""}.`);
+  };
+  r.readAsText(f);
+}
+function alertMsg(m){
+  const el=document.getElementById("count");
+  el.textContent=" — "+m;
+  setTimeout(()=>renderSpots(), 4000);
 }
 
 renderSpots();
