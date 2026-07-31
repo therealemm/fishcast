@@ -223,6 +223,22 @@ const fmtDay  = d => d.toLocaleDateString([], {weekday:"short"});
 // wave power (kW per metre of crest): 0.49 * Hs^2 * Te
 const wavePower = (hsM, teS) => 0.49 * hsM*hsM * teS;
 
+// sun altitude in degrees (compact J2000 solar position — plenty accurate for twilight bands)
+function sunAltitude(t){
+  const rad=Math.PI/180;
+  const days=t/86400000-10957.5;                       // days since J2000.0
+  const L=(280.460+0.9856474*days)%360;
+  const g=((357.528+0.9856003*days)%360)*rad;
+  const lambda=(L+1.915*Math.sin(g)+0.020*Math.sin(2*g))*rad;
+  const eps=(23.439-0.0000004*days)*rad;
+  const alpha=Math.atan2(Math.cos(eps)*Math.sin(lambda), Math.cos(lambda))/rad;
+  const delta=Math.asin(Math.sin(eps)*Math.sin(lambda));
+  const gmst=(18.697374558+24.06570982441908*days)%24;
+  const H=(((gmst*15+CONFIG.lon-alpha)%360+540)%360-180)*rad;
+  const phi=CONFIG.lat*rad;
+  return Math.asin(Math.sin(phi)*Math.sin(delta)+Math.cos(phi)*Math.cos(delta)*Math.cos(H))/rad;
+}
+
 async function getJSON(url){
   const r = await fetch(url);
   if(!r.ok) throw new Error(`${url.split("?")[0]} → HTTP ${r.status}`);
@@ -416,6 +432,8 @@ async function loadAll(){
                 return {sstT:pairs.map(p=>p.t), sstV:pairs.map(p=>p.v*9/5+32)}; })(),
       suns:    wind.daily.sunrise.map((s,i)=>({rise:new Date(s).getTime(), set:new Date(wind.daily.sunset[i]).getTime()}))
     };
+    const dayStart=new Date(); dayStart.setHours(0,0,0,0);
+    DATA.biteLight = computeBiteLight(dayStart.getTime(), Math.max(DATA.marineT.at(-1), DATA.tideT.at(-1)));
 
     renderTide(tideCurve, tideHilo);
     renderWind(wind);
@@ -583,12 +601,9 @@ const nightShade = {
     // night: chart start → first sunrise, then each sunset → next sunrise
     band(-Infinity, s[0].rise, nightFill);
     for(let i=0;i<s.length;i++) band(s[i].set, s[i+1]?s[i+1].rise:Infinity, nightFill);
-    // low-light bite windows (±75 min of sunrise/sunset — matches the PRIME scoring)
-    if(!opts.noLowlight){
-      const LL=75*60000;
-      s.forEach(d=>{ band(d.rise-LL, d.rise+LL, "rgba(240,180,41,.08)");
-                     band(d.set-LL,  d.set+LL,  "rgba(240,180,41,.08)"); });
-    }
+    // bite-light windows (sun between -12 and +6 deg — nautical twilight through golden hour)
+    if(!opts.noLowlight && DATA.biteLight)
+      DATA.biteLight.forEach(sp=>band(sp.start, sp.end, "rgba(240,180,41,.08)"));
     ctx.restore();
   }
 };
@@ -763,12 +778,27 @@ function updatePhaseMarker(){
 }
 
 /* ---- fishiness score ---- */
-// light quality: dawn/dusk = 1, daylight = 0.5, dark night = 0.1 (+ a bit if the moon is bright)
+// light quality from real sun altitude:
+// golden hour + civil twilight (+6..-6 deg) = 1 · nautical (-6..-12) = gray light, 0.75
+// daylight tapers 1→0.5 as the sun climbs · astronomical (-12..-18) = 0.3 · dark = moon-dependent
 function lightQuality(t){
-  const LL=75*60000;
-  for(const d of DATA.suns){ if(Math.abs(t-d.rise)<LL || Math.abs(t-d.set)<LL) return 1; }
-  for(const d of DATA.suns){ if(t>=d.rise && t<d.set) return 0.5; }
+  const a=sunAltitude(t);
+  if(a>6)   return clamp(1-(a-6)/28, 0.5, 1);
+  if(a>=-6)  return 1;
+  if(a>=-12) return 0.75;
+  if(a>=-18) return 0.2 + 0.2*moon(new Date(t)).illum;
   return 0.1 + 0.3*moon(new Date(t)).illum;
+}
+// contiguous "bite light" spans (sun between -12 and +6 deg) — amber chart bands & PRIME scoring
+function computeBiteLight(t0, t1){
+  const spans=[]; let cur=null;
+  for(let t=t0; t<=t1; t+=300000){
+    const a=sunAltitude(t), on=a>=-12 && a<=6;
+    if(on && !cur) cur={start:t};
+    if(!on && cur){ cur.end=t; spans.push(cur); cur=null; }
+  }
+  if(cur){ cur.end=t1; spans.push(cur); }
+  return spans;
 }
 function fishiness(t){
   const c=evalAt(t);
@@ -833,9 +863,9 @@ function updateSky(t){
   const s=DATA.suns;
   let day=null;
   for(const d of s){ if(t>=d.rise && t<d.set){ day=d; break; } }
-  let u, face, alt;
+  let u, face;
   if(day){
-    u=(t-day.rise)/(day.set-day.rise); face="☀️"; alt=Math.sin(Math.PI*u);
+    u=(t-day.rise)/(day.set-day.rise); face="☀️";
   }else{
     let set=null, rise=null;
     for(const d of s){ if(d.set<=t) set=d.set; }
@@ -843,8 +873,9 @@ function updateSky(t){
     if(set==null) set=(rise??t)-10*3600000;
     if(rise==null) rise=set+10*3600000;
     u=clamp((t-set)/(rise-set), 0, 1);
-    face=moon(new Date(t)).face; alt=-Math.sin(Math.PI*u);
+    face=moon(new Date(t)).face;
   }
+  const alt=clamp(sunAltitude(t)/45, -1, 1);   // real sun altitude drives the sky color
   const W=strip.clientWidth;
   orb.textContent=face;
   orb.style.left=(12+u*(W-24))+"px";
@@ -855,16 +886,26 @@ function updateSky(t){
 /* ---- light ---- */
 function renderLight(){
   const now=Date.now();
-  // today's entry (or the next one if we're past today's sunset)
   const today = DATA.suns.find(d=>d.set>now) || DATA.suns.at(-1);
+  // twilight crossings for that day (scan sun altitude at 2-min steps)
+  const d0=new Date(today.rise); d0.setHours(0,0,0,0);
+  const x={}; let prev=sunAltitude(d0.getTime());
+  for(let t=d0.getTime()+120000; t<=d0.getTime()+86400000; t+=120000){
+    const a=sunAltitude(t);
+    if(prev<-12 && a>=-12) x.nDawn=t;
+    if(prev<-6  && a>=-6)  x.cDawn=t;
+    if(prev>-6  && a<=-6)  x.cDusk=t;
+    if(prev>-12 && a<=-12) x.nDusk=t;
+    prev=a;
+  }
   document.getElementById("lightToday").innerHTML =
-    `🌅 rise <b>${fmtTime(new Date(today.rise))}</b> &nbsp;·&nbsp; 🌇 set <b>${fmtTime(new Date(today.set))}</b>`;
-  // next low-light bite window (±75 min around rise/set)
-  const LL=75*60000;
-  const edges = DATA.suns.flatMap(d=>[d.rise,d.set]).sort((a,b)=>a-b);
-  const next = edges.find(e=>e+LL>now);
+    `🌅 rise <b>${fmtTime(new Date(today.rise))}</b> &nbsp;·&nbsp; 🌇 set <b>${fmtTime(new Date(today.set))}</b><br>`+
+    `<span style="font-size:.8rem;color:var(--dim)">naut dawn ${x.nDawn?fmtTime(new Date(x.nDawn)):"–"} · civil ${x.cDawn?fmtTime(new Date(x.cDawn)):"–"}`+
+    ` &nbsp;·&nbsp; civil dusk ${x.cDusk?fmtTime(new Date(x.cDusk)):"–"} · naut ${x.nDusk?fmtTime(new Date(x.nDusk)):"–"}</span>`;
+  // next bite-light span (sun -12..+6 deg)
+  const next = DATA.biteLight.find(sp=>sp.end>now);
   document.getElementById("lightWindows").innerHTML = next
-    ? `next low-light window<br><b>${fmtDay(new Date(next))} ${fmtTime(new Date(next-LL))} – ${fmtTime(new Date(next+LL))}</b>`
+    ? `next bite light<br><b>${fmtDay(new Date(next.start))} ${fmtTime(new Date(next.start))} – ${fmtTime(new Date(next.end))}</b>`
     : "–";
 }
 
@@ -880,9 +921,8 @@ function renderMoon(){
 
 /* ---- fishing windows ---- */
 function renderWindows(hilo, wind){
-  // sunrise/sunset per day for "low light" boost
-  const suns = wind.daily.sunrise.map((s,i)=>({rise:new Date(s).getTime(), set:new Date(wind.daily.sunset[i]).getTime()}));
-  const lowLight = ts => suns.some(s => Math.abs(ts-s.rise)<75*60000 || Math.abs(ts-s.set)<75*60000);
+  // "low light" boost = real bite-light spans (nautical twilight → golden hour)
+  const lowLight = ts => DATA.biteLight.some(sp => ts>=sp.start && ts<=sp.end);
 
   const now=Date.now(), horizon=now+2*86400000;
   const items=[];
