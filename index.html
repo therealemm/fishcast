@@ -65,6 +65,12 @@
   footer{color:var(--dim);font-size:.75rem;margin-top:18px;line-height:1.6}
   footer a{color:var(--accent)}
   .pill{display:inline-block;font-size:.7rem;padding:2px 8px;border-radius:20px;background:#0c1e2b;color:var(--dim);border:1px solid var(--line)}
+  select{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:.8rem;cursor:pointer}
+  select:hover{border-color:var(--accent)}
+  .xrow{display:grid;grid-template-columns:110px 1fr 56px;gap:2px 10px;align-items:center;font-size:.8rem;margin-top:7px}
+  .xbar{height:8px;border-radius:4px;background:#0c1e2b;overflow:hidden;border:1px solid var(--line)}
+  .xbar>div{height:100%}
+  .xnote{grid-column:1/-1;color:var(--dim);font-size:.72rem}
 </style>
 </head>
 <body>
@@ -95,8 +101,15 @@
       </div>
       <input id="timeSlider" type="range" style="flex:1;min-width:220px;accent-color:var(--accent)" />
       <button onclick="snapNow()">⟲ now</button>
+      <select id="speciesSel" onchange="setSpecies(this.value)">
+        <option value="striper">Striped bass</option>
+        <option value="perch">Surfperch</option>
+        <option value="halibut">Halibut</option>
+      </select>
+      <button onclick="toggleExplain()" id="explainBtn">explain score ▾</button>
     </div>
     <div class="sub" style="margin-top:6px">Drag to scrub the forecast — the cards below update to that moment. The tide curve is shaded by the wade-o-meter.</div>
+    <div id="explainPanel" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:4px"></div>
   </div>
 
   <!-- HERO: right now + gear verdict -->
@@ -473,6 +486,7 @@ let rafPending=false;
 function onScrub(){
   renderConditions(evalAt(scrubTime));
   updateSky(scrubTime);
+  renderExplain();
   updatePhaseMarker();
   if(!rafPending){ rafPending=true; requestAnimationFrame(()=>{ rafPending=false; for(const k in charts) charts[k].update("none"); }); }
 }
@@ -800,16 +814,66 @@ function computeBiteLight(t0, t1){
   if(cur){ cur.end=t1; spans.push(cur); }
   return spans;
 }
-function fishiness(t){
+/* ---- species profiles ---- */
+let SPECIES_SEL = localStorage.getItem("fishcast_species") || "striper";
+const SPECIES_NAME={striper:"Striped bass", perch:"Barred surfperch", halibut:"California halibut"};
+const SST_BAND={striper:[55,62], perch:[50,62], halibut:[58,66]};
+// component weights per species (each column sums to 100)
+const PART_W={
+  striper:{flow:30, light:25, wade:20, power:10, wind:10, sst:5},
+  perch:  {flow:25, light:15, wade:20, power:20, wind:10, sst:10},
+  halibut:{flow:15, light:15, wade:15, power:30, wind:10, sst:15}
+};
+const bandFrac=(v,lo,hi,taper=4)=> v<lo?clamp(1-(lo-v)/taper,0,1) : v>hi?clamp(1-(v-hi)/taper,0,1) : 1;
+
+function lightShape(t, sp){
+  const a=sunAltitude(t);
+  if(sp==="striper") return lightQuality(t);                                    // low-light hunter
+  if(sp==="perch"){  // daytime feeder — dawn through morning sun is the sweet spot
+    if(a>=0 && a<=40) return 1; if(a>40) return .75;
+    if(a>=-6) return .85; if(a>=-12) return .5; return .1; }
+  // halibut: sight-feeder, wants real daylight
+  if(a>10) return 1; if(a>0) return .6; if(a>=-6) return .3; return .05;
+}
+function powerShape(p, sp){
+  if(sp==="striper") return (1-Math.exp(-p/4))*clamp((26-p)/10,0,1);  // stirred but not blown out
+  if(sp==="perch")   return clamp(p/3,0,1)*clamp((14-p)/6,0,1);       // enough wash to dig sandcrabs
+  return clamp((8-p)/6,0,1);                                          // halibut: the flatter the better
+}
+function flowShape(c, sp){
+  if(!c.flow) return 0;
+  const r=c.flow.rate;
+  if(sp==="striper") return clamp(r/1.2,0,1);
+  if(sp==="perch")   return clamp(r/1.0,0,1)*(c.flow.rising?1:.7);    // perch bite the flood
+  return clamp(r/0.8,0,1);
+}
+const lightBand = a => a<=-18?"dark night" : a<=-12?"astronomical twilight" : a<=-6?"nautical twilight"
+                     : a<=6?"civil twilight / golden hour" : `daylight (sun ${a|0}°)`;
+
+// the full ledger behind the score — every point accounted for
+function fishParts(t, sp=SPECIES_SEL){
   const c=evalAt(t);
   const w=computeWadeScore(c.power, c.setFt, c.tide).score;
-  let s=0;
-  s += 35*(c.flow ? clamp(c.flow.rate/1.2, 0, 1) : 0);   // moving water (rule of 12ths)
-  s += 25*lightQuality(t);                                // dawn/dusk >> day >> dark night
-  s += 20*clamp((70-w)/70, 0, 1);                         // has to be wadeable
-  s += 10*(1-Math.exp(-c.power/4));                       // enough energy to stir bait
-  s += 10*clamp((18-c.windMph)/18, 0, 1);                 // castable wind
-  return Math.round(clamp(s,0,100));
+  const W=PART_W[sp], parts=[];
+  const add=(label,key,frac,note)=>parts.push({label, max:W[key], pts:Math.round(W[key]*clamp(frac,0,1)), note});
+  add("moving water","flow", flowShape(c,sp),
+    c.flow ? `${c.flow.rate.toFixed(1)} ft/hr · ${c.flow.twelfths}/12 on the ${c.flow.rising?"flood":"ebb"}`+
+             (sp==="perch"&&!c.flow.rising?" (perch prefer the flood)":"") : "outside tide table");
+  add("light","light", lightShape(t,sp), lightBand(sunAltitude(t)));
+  add("wadeability","wade", clamp((70-w)/70,0,1), `wade-o-meter roughness ${w}/100`);
+  add(sp==="halibut"?"calm water":"bait stir","power", powerShape(c.power,sp), `${c.power.toFixed(1)} kW/m swell power`);
+  add("wind","wind", clamp((18-c.windMph)/18,0,1), `${c.windMph.toFixed(0)} mph ${compass(c.windDir)}`);
+  add("water temp","sst", c.sstF!=null?bandFrac(c.sstF,...SST_BAND[sp]):0.5,
+    c.sstF!=null ? `${c.sstF.toFixed(1)}°F (ideal ${SST_BAND[sp][0]}–${SST_BAND[sp][1]}°F)` : "no data");
+  if(sp==="perch"){  // prey lie low when conditions favor the predator
+    const heat=Math.min(lightQuality(t), c.flow?clamp(c.flow.rate/1.2,0,1):0);
+    if(heat>0.4) parts.push({label:"striper pressure", max:-10, pts:-Math.round(10*heat),
+      note:"prime striper conditions — perch hug the bottom when big fish patrol"});
+  }
+  return parts;
+}
+function fishiness(t, sp=SPECIES_SEL){
+  return Math.round(clamp(fishParts(t,sp).reduce((a,p)=>a+p.pts,0), 0, 100));
 }
 const grade      = v => v>=80?"A":v>=62?"B":v>=45?"C":"D";
 const gradeColor = v => v>=80?"#3ddc84":v>=62?"#f0b429":v>=45?"#e8935a":"#ff6b6b";
@@ -819,6 +883,34 @@ function scrubTo(t){
   scrubTime=clamp(t, +s.min, +s.max); s.value=scrubTime; onScrub();
 }
 
+function setSpecies(v){
+  SPECIES_SEL=v; localStorage.setItem("fishcast_species", v);
+  if(DATA){ renderFishiness(); onScrub(); }
+}
+
+let explainOpen=false;
+function toggleExplain(){
+  explainOpen=!explainOpen;
+  document.getElementById("explainPanel").style.display=explainOpen?"block":"none";
+  document.getElementById("explainBtn").textContent=explainOpen?"explain score ▴":"explain score ▾";
+  renderExplain();
+}
+function renderExplain(){
+  if(!explainOpen || !DATA) return;
+  const parts=fishParts(scrubTime), total=fishiness(scrubTime);
+  document.getElementById("explainPanel").innerHTML =
+    `<div style="font-size:.8rem;color:var(--dim)">${SPECIES_NAME[SPECIES_SEL]} · `+
+    `<b style="color:${gradeColor(total)}">${total}/100 (${grade(total)})</b> at `+
+    `${new Date(scrubTime).toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})}</div>`+
+    parts.map(p=>{
+      const neg=p.pts<0, pct=p.max?Math.abs(p.pts)/Math.abs(p.max)*100:0;
+      return `<div class="xrow"><span>${p.label}</span>`+
+        `<div class="xbar"><div style="width:${pct}%;background:${neg?"var(--rough)":gradeColor(pct)}"></div></div>`+
+        `<span style="text-align:right;font-weight:700">${neg?p.pts:p.pts+" / "+p.max}</span>`+
+        `<div class="xnote">${p.note}</div></div>`;
+    }).join("");
+}
+
 function renderFishiness(){
   const t0=Date.now(), t1=Math.min(DATA.marineT.at(-1), DATA.windT.at(-1), DATA.tideT.at(-1));
   const pts=[]; for(let t=t0; t<=t1; t+=1800000) pts.push({x:t, y:fishiness(t)});
@@ -826,7 +918,9 @@ function renderFishiness(){
   const byDay={};
   pts.forEach(p=>{ const k=new Date(p.x).toDateString(); if(!byDay[k] || p.y>byDay[k].y) byDay[k]=p; });
   const peaks=Object.values(byDay);
-  document.getElementById("fishDays").innerHTML = peaks.map(p=>{
+  document.getElementById("fishDays").innerHTML =
+    `<span class="pill" style="border-color:var(--accent);color:var(--accent)">${SPECIES_NAME[SPECIES_SEL]}</span> `+
+    peaks.map(p=>{
     const col=gradeColor(p.y), d=new Date(p.x);
     return `<span class="pill" style="cursor:pointer;border-color:${col};color:${col}" onclick="scrubTo(${p.x})">`+
            `${fmtDay(d)} ${grade(p.y)} · ${fmtTime(d)}</span>`;
@@ -974,6 +1068,7 @@ function renderWindows(hilo, wind){
   });
 }
 
+document.getElementById("speciesSel").value=SPECIES_SEL;
 loadAll();
 </script>
 </body>
