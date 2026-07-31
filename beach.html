@@ -267,7 +267,8 @@ function renderSpots(){
     '<button class="btn-ghost" onclick="shareSpots()">📤 Share</button>'+
     '<button class="btn-ghost" onclick="exportJSON(spots,\'fishcast-spots.json\')">⬇ Full backup</button>'+
     '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import</button>'+
-    '</div>';
+    '</div>'+
+    '<div class="tip" id="shareStatus" style="margin-top:6px">share v3</div>';
 }
 function esc(s){ return (s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])); }
 
@@ -292,33 +293,45 @@ function shareFiltered(){
   });
 }
 
+function shareStatus(m){
+  const el=document.getElementById("shareStatus");
+  if(el) el.textContent=m;
+}
 async function shareSpots(){
-  const data=shareFiltered();
-  const json=JSON.stringify(data,null,2);
-  // Chrome (Android) and iOS whitelist shareable file types — .json isn't on it, .txt is
-  const candidates=[
-    new File([json], "fishcast-spots-share.txt",  {type:"text/plain"}),
-    new File([json], "fishcast-spots-share.json", {type:"application/json"})
-  ];
+  let data;
   try{
+    shareStatus("building share file…");
+    data=shareFiltered();
+    const json=JSON.stringify(data,null,2);
+    // Chrome (Android) and iOS whitelist shareable file types — .json isn't on it, .txt is
+    const candidates=[
+      new File([json], "fishcast-spots-share.txt",  {type:"text/plain"}),
+      new File([json], "fishcast-spots-share.json", {type:"application/json"})
+    ];
     if(navigator.share){
       for(const f of candidates){
-        if(navigator.canShare && navigator.canShare({files:[f]})){
+        const ok = navigator.canShare ? navigator.canShare({files:[f]}) : false;
+        shareStatus(`canShare ${f.name.split(".").pop()}: ${ok}`);
+        if(ok){
           await navigator.share({files:[f], title:"FishCast spots"});
+          shareStatus("shared ✓");
           return;
         }
       }
       if(json.length<60000){   // no file sharing at all — small payloads can ride as text
         await navigator.share({title:"FishCast spots", text:json});
+        shareStatus("shared as text ✓");
         return;
       }
+      shareStatus("no shareable file type & payload too big for text — downloading…");
+    }else{
+      shareStatus("navigator.share unavailable — downloading…");
     }
     exportJSON(data, "fishcast-spots-share.json");
-    alertMsg("No share sheet on this device — downloaded the file instead.");
   }catch(e){
-    if(e && e.name==="AbortError") return;           // user closed the share sheet — fine
-    exportJSON(data, "fishcast-spots-share.json");
-    alertMsg("Share failed ("+((e&&e.name)||"error")+") — downloaded the file instead.");
+    if(e && e.name==="AbortError"){ shareStatus("share cancelled"); return; }
+    shareStatus("share failed: "+((e&&(e.name+": "+e.message))||"unknown error")+" — downloading instead");
+    if(data) exportJSON(data, "fishcast-spots-share.json");
   }
 }
 
