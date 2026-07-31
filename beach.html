@@ -105,7 +105,7 @@
   <div style="margin-top:10px" id="exportRow"></div>
   <input type="file" id="photoAdd" accept="image/*" capture="environment" style="display:none" onchange="photoAdded(this)" />
   <input type="file" id="importFile" accept=".json,.txt,application/json,text/plain" style="display:none" onchange="importSpots(this)" />
-  <div class="tip">Spots live only on this device. Share sends a file to whoever <i>you</i> pick (AirDrop, email, yourself for the desktop) — import there merges without duplicates.</div>
+  <div class="tip">Spots live only on this device. Share sends a file (.txt) to whoever <i>you</i> pick — import it on the other end to merge without duplicates. Texting apps often block or shrink file attachments: email, Drive, or Nearby Share are more reliable, and unchecking photos keeps the file small enough for anything.</div>
 </div>
 
 <script>
@@ -226,7 +226,7 @@ function renderSpots(){
   const wrap=document.getElementById("spots");
   if(!spots.length){ wrap.innerHTML='<div class="empty">No spots yet. Walk to a trough or bar at low tide and tag it — or import a file from your phone.</div>';
     document.getElementById("exportRow").innerHTML=
-      '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import spots (JSON)</button>';
+      '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import spots</button>';
     return; }
 
   // compute live distance if we have a fix
@@ -302,7 +302,7 @@ async function shareSpots(){
   try{
     shareStatus("building share file…");
     data=shareFiltered();
-    const json=JSON.stringify(data,null,2);
+    const json=JSON.stringify(data);   // compact — texting apps have tight attachment limits
     // Chrome (Android) and iOS whitelist shareable file types — .json isn't on it, .txt is
     const candidates=[
       new File([json], "fishcast-spots-share.txt",  {type:"text/plain"}),
