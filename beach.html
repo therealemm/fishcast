@@ -70,6 +70,43 @@
   </div>
 </div>
 
+<!-- CATCH LOG -->
+<div class="card">
+  <h2>Catch log</h2>
+  <div class="row">
+    <div>
+      <label class="field">Species</label>
+      <select id="logSpecies">
+        <option value="striper">Striped bass</option>
+        <option value="perch">Surfperch</option>
+        <option value="halibut">Halibut</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div>
+      <label class="field">Length (in, opt.)</label>
+      <input id="logLen" type="number" inputmode="decimal" placeholder="–" />
+    </div>
+    <div>
+      <label class="field">When</label>
+      <select id="logWhen">
+        <option value="0">just now</option>
+        <option value="5">5 min ago</option>
+        <option value="15">15 min ago</option>
+        <option value="30">30 min ago</option>
+      </select>
+    </div>
+  </div>
+  <label class="field">Note (optional)</label>
+  <input id="logNote" placeholder="lure, depth, what happened…" />
+  <div class="row" style="margin-top:12px">
+    <button class="btn-tag" onclick="logEntry('catch')">🐟 Log catch</button>
+    <button class="btn-ghost" onclick="logEntry('blank')">⭕ Log blank</button>
+  </div>
+  <div class="tip">Logs instantly with GPS + time; swell/wind/tide/12ths/temp snapshot fills in seconds later (or backfills next time you're online). Blanks are data too.</div>
+  <div id="logList" style="margin-top:12px"></div>
+</div>
+
 <!-- TAG A SPOT -->
 <div class="card">
   <h2>Tag a spot</h2>
@@ -266,7 +303,7 @@ function renderSpots(){
     '</div>'+
     '<div class="row">'+
     '<button class="btn-ghost" onclick="shareSpots()">📤 Share</button>'+
-    '<button class="btn-ghost" onclick="exportJSON(spots,\'fishcast-spots.json\')">⬇ Full backup</button>'+
+    '<button class="btn-ghost" onclick="exportJSON({spots:spots, log:LOG},\'fishcast-backup.json\')">⬇ Full backup</button>'+
     '<button class="btn-ghost" onclick="document.getElementById(\'importFile\').click()">⬆ Import</button>'+
     '</div>'+
     '<div class="tip" id="shareStatus" style="margin-top:6px">share v3</div>';
@@ -406,16 +443,27 @@ function importSpots(inp){
   r.onload=()=>{
     let incoming;
     try{ incoming=JSON.parse(r.result); }catch(e){ alertMsg("That file isn't valid JSON."); return; }
-    if(!Array.isArray(incoming)){ alertMsg("That file isn't a FishCast spots export."); return; }
+    // accept both formats: bare spots array (shares, old exports) or {spots, log} (full backup)
+    const inSpots = Array.isArray(incoming) ? incoming : (Array.isArray(incoming.spots)?incoming.spots:null);
+    const inLog   = Array.isArray(incoming) ? [] : (Array.isArray(incoming.log)?incoming.log:[]);
+    if(!inSpots){ alertMsg("That file isn't a FishCast export."); return; }
     const have=new Set(spots.map(s=>s.id));
     let added=0, skipped=0;
-    incoming.forEach(s=>{
+    inSpots.forEach(s=>{
       if(!s || typeof s.lat!=="number" || typeof s.lon!=="number" || !s.id){ skipped++; return; }
       if(have.has(s.id)){ skipped++; return; }
       spots.push(s); have.add(s.id); added++;
     });
+    const haveLog=new Set(LOG.map(e=>e.id));
+    let addedLog=0;
+    inLog.forEach(e=>{
+      if(!e || !e.id || !e.ts || haveLog.has(e.id)) return;
+      LOG.push(e); haveLog.add(e.id); addedLog++;
+    });
+    if(addedLog){ LOG.sort((a,b)=>b.ts-a.ts); persistLog(); renderLog(); }
     persist(); renderSpots();
-    alertMsg(`Imported ${added} spot${added===1?"":"s"}${skipped?` (${skipped} skipped — duplicates or invalid)`:""}.`);
+    alertMsg(`Imported ${added} spot${added===1?"":"s"}`+(addedLog?` + ${addedLog} log entr${addedLog===1?"y":"ies"}`:"")+
+      (skipped?` (${skipped} skipped)`:"")+".");
   };
   r.readAsText(f);
 }
@@ -426,6 +474,149 @@ function alertMsg(m){
 }
 
 renderSpots();
+
+/* ================= CATCH LOG ================= */
+const LOGKEY="fishcast_log";
+const LAT=37.7599, LON=-122.5108, STATION="9414290", TZ="America/Los_Angeles";
+const SPECIES_LABEL={striper:"Striped bass", perch:"Surfperch", halibut:"Halibut", other:"Fish"};
+let LOG = (()=>{ try{ return JSON.parse(localStorage.getItem(LOGKEY)||"[]"); }catch(e){ return []; } })();
+function persistLog(){ localStorage.setItem(LOGKEY, JSON.stringify(LOG)); }
+
+function logEntry(kind){
+  const e={
+    id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    kind,
+    species: kind==="catch" ? document.getElementById("logSpecies").value : null,
+    len: kind==="catch" && document.getElementById("logLen").value ? +document.getElementById("logLen").value : null,
+    note: document.getElementById("logNote").value.trim() || null,
+    ts: Date.now() - (+document.getElementById("logWhen").value)*60000,
+    lat: last?last.latitude:null, lon: last?last.longitude:null, acc: last?Math.round(last.accuracy):null,
+    cond: null
+  };
+  // nearest tagged spot at log time — links the fish to structure
+  if(last && spots.length){
+    let best=null;
+    spots.forEach(s=>{ const d=haversine(last.latitude,last.longitude,s.lat,s.lon);
+      if(!best || d<best.d) best={d,label:s.label}; });
+    if(best && best.d<400) e.spot={label:best.label, dist:Math.round(best.d)};
+  }
+  LOG.unshift(e); persistLog(); renderLog();
+  document.getElementById("logLen").value=""; document.getElementById("logNote").value="";
+  document.getElementById("logWhen").value="0";
+  fillConditions(e);
+}
+function delLog(id){ LOG=LOG.filter(e=>e.id!==id); persistLog(); renderLog(); }
+
+/* ---- conditions snapshot: same math as the dashboard, evaluated at e.ts ---- */
+function interp(xs, ys, x){
+  if(!xs.length) return null;
+  if(x<=xs[0]) return ys[0];
+  if(x>=xs[xs.length-1]) return ys[ys.length-1];
+  let i=1; while(i<xs.length && xs[i]<x) i++;
+  const f=(x-xs[i-1])/(xs[i]-xs[i-1]);
+  return ys[i-1]+f*(ys[i]-ys[i-1]);
+}
+function sunAltitude(t){
+  const rad=Math.PI/180, days=t/86400000-10957.5;
+  const L=(280.460+0.9856474*days)%360, g=((357.528+0.9856003*days)%360)*rad;
+  const lambda=(L+1.915*Math.sin(g)+0.020*Math.sin(2*g))*rad, eps=(23.439-0.0000004*days)*rad;
+  const alpha=Math.atan2(Math.cos(eps)*Math.sin(lambda), Math.cos(lambda))/rad;
+  const delta=Math.asin(Math.sin(eps)*Math.sin(lambda));
+  const gmst=(18.697374558+24.06570982441908*days)%24;
+  const H=(((gmst*15+LON-alpha)%360+540)%360-180)*rad, phi=LAT*rad;
+  return Math.asin(Math.sin(phi)*Math.sin(delta)+Math.cos(phi)*Math.cos(delta)*Math.cos(H))/rad;
+}
+function moonPhase(t){
+  const syn=29.530588853, ref=Date.UTC(2000,0,6,18,14,0);
+  let age=((t-ref)/86400000)%syn; if(age<0) age+=syn;
+  const frac=age/syn;
+  return {illum:(1-Math.cos(2*Math.PI*frac))/2,
+    face:["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"][Math.round(frac*8)%8]};
+}
+const pad2=n=>String(n).padStart(2,"0");
+const ymdOf=d=>`${d.getFullYear()}${pad2(d.getMonth()+1)}${pad2(d.getDate())}`;
+const COMPASS16=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+
+async function fillConditions(e){
+  try{
+    renderLog();  // shows "pending"
+    const M2FT=3.28084, KMH2MPH=0.621371;
+    const d0=ymdOf(new Date(e.ts-86400000)), d1=ymdOf(new Date(e.ts+86400000));
+    const [marine, wind, curve, hilo]=await Promise.all([
+      fetch(`https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&hourly=wave_height,swell_wave_height,swell_wave_period,swell_wave_direction,wind_wave_height,sea_surface_temperature&timezone=${TZ}&past_days=7&forecast_days=2`).then(r=>r.json()),
+      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m&timezone=${TZ}&past_days=7&forecast_days=2`).then(r=>r.json()),
+      fetch(`https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?station=${STATION}&product=predictions&datum=MLLW&time_zone=lst_ldt&units=english&interval=h&format=json&begin_date=${d0}&end_date=${d1}`).then(r=>r.json()),
+      fetch(`https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?station=${STATION}&product=predictions&datum=MLLW&time_zone=lst_ldt&units=english&interval=hilo&format=json&begin_date=${d0}&end_date=${d1}`).then(r=>r.json())
+    ]);
+    const mT=marine.hourly.time.map(s=>new Date(s).getTime());
+    const wT=wind.hourly.time.map(s=>new Date(s).getTime());
+    const tT=curve.predictions.map(p=>new Date(p.t.replace(" ","T")).getTime());
+    const tV=curve.predictions.map(p=>+p.v);
+    const ev=hilo.predictions.map(p=>({t:new Date(p.t.replace(" ","T")).getTime(), v:+p.v, type:p.type})).sort((a,b)=>a.t-b.t);
+    // rule of 12ths between the bracketing hi/lo events
+    let flow=null;
+    for(let i=0;i<ev.length-1;i++){
+      if(ev[i].t<=e.ts && e.ts<ev[i+1].t){
+        const a=ev[i], b=ev[i+1], u=(e.ts-a.t)/(b.t-a.t);
+        const seg=Math.min(5,Math.floor(u*6)), tw=[1,2,3,3,2,1][seg];
+        flow={rate:+(Math.abs(b.v-a.v)*(tw/12)/(((b.t-a.t)/3600000)/6)).toFixed(2),
+              twelfths:tw, seg:seg+1, rising:b.v>a.v, maxFlow:seg===2||seg===3};
+        break;
+      }
+    }
+    const sstPairs=marine.hourly.time.map((s,i)=>({t:mT[i], v:marine.hourly.sea_surface_temperature[i]})).filter(p=>p.v!=null);
+    const swH=interp(mT, marine.hourly.swell_wave_height, e.ts), swP=interp(mT, marine.hourly.swell_wave_period, e.ts);
+    e.cond={
+      tideFt:+interp(tT,tV,e.ts).toFixed(2), flow,
+      swellFt:+(swH*M2FT).toFixed(1), swellPer:+swP.toFixed(0),
+      swellDir:COMPASS16[Math.round(interp(mT,marine.hourly.swell_wave_direction,e.ts)/22.5)%16],
+      powerKW:+(0.49*swH*swH*swP).toFixed(1),
+      waveFt:+(interp(mT,marine.hourly.wave_height,e.ts)*M2FT).toFixed(1),
+      chopFt:+(interp(mT,marine.hourly.wind_wave_height,e.ts)*M2FT).toFixed(1),
+      windMph:+(interp(wT,wind.hourly.wind_speed_10m,e.ts)*KMH2MPH).toFixed(0),
+      gustMph:+(interp(wT,wind.hourly.wind_gusts_10m,e.ts)*KMH2MPH).toFixed(0),
+      windDir:COMPASS16[Math.round(interp(wT,wind.hourly.wind_direction_10m,e.ts)/22.5)%16],
+      sstF: sstPairs.length ? +(interp(sstPairs.map(p=>p.t), sstPairs.map(p=>p.v), e.ts)*9/5+32).toFixed(1) : null,
+      sunAlt:+sunAltitude(e.ts).toFixed(1),
+      moonIllum:+(moonPhase(e.ts).illum*100).toFixed(0), moonFace:moonPhase(e.ts).face,
+      v:1
+    };
+    persistLog(); renderLog();
+  }catch(err){
+    // offline or API hiccup — entry is safe, backfill will retry on next load
+    renderLog();
+  }
+}
+// backfill any pending snapshots (page load = we're presumably online again)
+LOG.filter(e=>!e.cond).forEach(e=>fillConditions(e));
+
+function condLine(c){
+  if(!c) return '<span style="color:var(--mid)">conditions pending — will backfill when online</span>';
+  const f=c.flow;
+  return `tide ${c.tideFt} ft · `+
+    (f?`${f.rising?"flood":"ebb"} ${f.rate} ft/hr · ${f.twelfths}/12${f.maxFlow?" MAX":""} (hr ${f.seg}/6)`:"slack?")+
+    `<br>swell ${c.swellFt} ft @ ${c.swellPer}s ${c.swellDir} · ${c.powerKW} kW/m · chop ${c.chopFt} ft`+
+    `<br>wind ${c.windMph} mph ${c.windDir} (g ${c.gustMph}) · ${c.sstF!=null?c.sstF+"°F · ":""}sun ${c.sunAlt}° · ${c.moonFace} ${c.moonIllum}%`;
+}
+function renderLog(){
+  const el=document.getElementById("logList");
+  if(!LOG.length){ el.innerHTML=""; return; }
+  el.innerHTML=LOG.map(e=>{
+    const d=new Date(e.ts);
+    const head = e.kind==="catch"
+      ? `🐟 <b>${SPECIES_LABEL[e.species]||"Fish"}</b>${e.len?` · ${e.len}″`:""}`
+      : `⭕ <b>Blank</b>`;
+    return `<div class="spot">
+      <div class="top"><span class="name">${head}</span>
+        <span class="type">${d.toLocaleDateString([], {weekday:"short"})} ${d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}</span>
+        <button class="del" onclick="delLog('${e.id}')">delete</button></div>
+      ${e.spot?`<div class="meta">near “${esc(e.spot.label)}” (${e.spot.dist} m)</div>`:""}
+      ${e.note?`<div class="meta">${esc(e.note)}</div>`:""}
+      <div class="meta" style="line-height:1.6;margin-top:6px">${condLine(e.cond)}</div>
+    </div>`;
+  }).join("");
+}
+renderLog();
 </script>
 </body>
 </html>
